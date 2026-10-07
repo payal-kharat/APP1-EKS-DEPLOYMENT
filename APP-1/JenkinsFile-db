@@ -23,28 +23,22 @@ pipeline {
         ECR_REGISTRY = 'https://552940445807.dkr.ecr.us-east-1.amazonaws.com'
         ECR_CREDENTIALS = 'ECR'
 
-        DEV_ECR_REPO = 'employee-mgm-dev-db'
-        QA_ECR_REPO = 'employee-mgm-qa-db'
-        UAT_ECR_REPO = 'employee-mgm-uat-db'
-        PROD_ECR_REPO = 'employee-mgm-prod-db'
+        DEV_ECR_REPO = 'app-1-dev-db'
+        QA_ECR_REPO = 'app-1-qa-db'
+        UAT_ECR_REPO = 'app-1-uat-db'
+        PROD_ECR_REPO = 'app-1-prod-db'
 
-        DEV_CLUSTER = 'employee-mgm-dev-cluster'
-        QA_CLUSTER = 'employee-mgm-qa-cluster'
-        UAT_CLUSTER = 'employee-mgm-uat-cluster'
-        PROD_CLUSTER = 'employee-mgm-prod-cluster'
+        DEV_CLUSTER = 'app-1-dev-cluster'
+        QA_CLUSTER = 'app-1-qa-cluster'
+        UAT_CLUSTER = 'app-1-uat-cluster'
+        PROD_CLUSTER = 'app-1-prod-cluster'
 
         DB_DEPLOYMENT = 'mysql'
         DB_CONTAINER = 'mysql'
-        DB_SERVICE = 'app3-db'
+        DB_SERVICE = 'app1-db'
     }
 
     stages {
-
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
 
         stage('Get Commit ID') {
             steps {
