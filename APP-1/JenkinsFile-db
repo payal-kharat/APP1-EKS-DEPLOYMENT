@@ -17,29 +17,29 @@ pipeline {
 
     environment {
         AWS_REGION = 'us-east-1'
-        AWS_ACCOUNT_ID = '552940445807'
         AWS_CREDENTIALS = 'AWS'
+
+        AWS_ACCOUNT_ID = '552940445807'
+        ECR_REGISTRY = 'https://552940445807.dkr.ecr.us-east-1.amazonaws.com'
         ECR_CREDENTIALS = 'ECR'
+
+        DEV_ECR_REPO = 'employee-mgm-dev-db'
+        QA_ECR_REPO = 'employee-mgm-qa-db'
+        UAT_ECR_REPO = 'employee-mgm-uat-db'
+        PROD_ECR_REPO = 'employee-mgm-prod-db'
 
         DEV_CLUSTER = 'employee-mgm-dev-cluster'
         QA_CLUSTER = 'employee-mgm-qa-cluster'
         UAT_CLUSTER = 'employee-mgm-uat-cluster'
         PROD_CLUSTER = 'employee-mgm-prod-cluster'
 
-        DEV_NAMESPACE = 'dev'
-        QA_NAMESPACE = 'qa'
-        UAT_NAMESPACE = 'uat'
-        PROD_NAMESPACE = 'prod'
-
-        DEV_ECR = 'employee-mgm-dev-db'
-        QA_ECR = 'employee-mgm-qa-db'
-        UAT_ECR = 'employee-mgm-uat-db'
-        PROD_ECR = 'employee-mgm-prod-db'
-
-        ECR_REGISTRY = 'https://552940445807.dkr.ecr.us-east-1.amazonaws.com'
+        DB_DEPLOYMENT = 'mysql'
+        DB_CONTAINER = 'mysql'
+        DB_SERVICE = 'app3-db'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
@@ -54,12 +54,103 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Commit ID: ${env.COMMIT_ID}"
+                    echo "COMMIT ID: ${env.COMMIT_ID}"
+
+                    if (params.ENVIRONMENT == 'dev') {
+                        env.DEV_TAG = "DEV-${env.COMMIT_ID}"
+                        echo "DEV IMAGE TAG: ${env.DEV_TAG}"
+                    } else {
+                        if (!params.DEV_IMAGE_TAG?.trim()) {
+                            error("DEV_IMAGE_TAG is required for ${params.ENVIRONMENT}")
+                        }
+
+                        if (!params.DEV_IMAGE_TAG.startsWith('DEV-')) {
+                            error("DEV_IMAGE_TAG must start with DEV-, example: DEV-a1b2c3d")
+                        }
+
+                        env.DEV_TAG = params.DEV_IMAGE_TAG.trim()
+                        echo "PROMOTING EXISTING DEV IMAGE: ${env.DEV_TAG}"
+                    }
                 }
             }
         }
 
-        stage('Build and Push DEV Image') {
+        stage('Set Environment') {
+            steps {
+                script {
+                    if (params.ENVIRONMENT == 'dev') {
+                        env.CLUSTER_NAME = env.DEV_CLUSTER
+                        env.ECR_REPO = env.DEV_ECR_REPO
+                        env.NAMESPACE = 'dev'
+                        env.DEPLOY_TAG = env.DEV_TAG
+                    }
+
+                    if (params.ENVIRONMENT == 'qa') {
+                        env.CLUSTER_NAME = env.QA_CLUSTER
+                        env.ECR_REPO = env.QA_ECR_REPO
+                        env.NAMESPACE = 'qa'
+                        env.DEPLOY_TAG = "QA-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+                    }
+
+                    if (params.ENVIRONMENT == 'uat') {
+                        env.CLUSTER_NAME = env.UAT_CLUSTER
+                        env.ECR_REPO = env.UAT_ECR_REPO
+                        env.NAMESPACE = 'uat'
+                        env.DEPLOY_TAG = "UAT-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+                    }
+
+                    if (params.ENVIRONMENT == 'prod') {
+                        env.CLUSTER_NAME = env.PROD_CLUSTER
+                        env.ECR_REPO = env.PROD_ECR_REPO
+                        env.NAMESPACE = 'prod'
+                        env.DEPLOY_TAG = "PROD-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+                    }
+
+                    echo "ENVIRONMENT : ${params.ENVIRONMENT}"
+                    echo "CLUSTER     : ${env.CLUSTER_NAME}"
+                    echo "NAMESPACE   : ${env.NAMESPACE}"
+                    echo "ECR REPO    : ${env.ECR_REPO}"
+                    echo "DEPLOY TAG  : ${env.DEPLOY_TAG}"
+                }
+            }
+        }
+
+        stage('Connect to EKS') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS}"]
+                ]) {
+                    sh '''
+                        set -e
+
+                        aws sts get-caller-identity
+
+                        aws eks update-kubeconfig \
+                            --name "${CLUSTER_NAME}" \
+                            --region "${AWS_REGION}"
+
+                        kubectl get nodes
+                    '''
+                }
+            }
+        }
+
+        stage('Create Kubernetes Namespace') {
+            steps {
+                sh '''
+                    set -e
+
+                    kubectl create namespace "${NAMESPACE}" \
+                        --dry-run=client \
+                        -o yaml | kubectl apply -f -
+
+                    kubectl get namespace "${NAMESPACE}"
+                '''
+            }
+        }
+
+        stage('Build DB Image') {
             when {
                 expression {
                     params.ENVIRONMENT == 'dev'
@@ -67,28 +158,23 @@ pipeline {
             }
             steps {
                 script {
-                    env.DEV_IMAGE_TAG = "DEV-${COMMIT_ID}"
+                    docker.withRegistry("${ECR_REGISTRY}", "${ECR_CREDENTIALS}") {
+                        sh '''
+                            set -e
 
-                    def image = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR}:${DEV_IMAGE_TAG}"
-
-                    docker.withRegistry(ECR_REGISTRY, ECR_CREDENTIALS) {
-                        sh """
                             docker build \
-                            -t ${image} \
-                            APP-1/nginx-flask-mysql/db/
+                                -t "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR_REPO}:${DEV_TAG}" \
+                                .
 
-                            docker push ${image}
-
-                            docker image rm ${image} || true
-                        """
+                            docker push \
+                                "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR_REPO}:${DEV_TAG}"
+                        '''
                     }
-
-                    echo "DEV image pushed: ${image}"
                 }
             }
         }
 
-        stage('Deploy DEV') {
+        stage('Deploy DB - DEV') {
             when {
                 expression {
                     params.ENVIRONMENT == 'dev'
@@ -96,62 +182,41 @@ pipeline {
             }
             steps {
                 script {
-                    def image = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR}:${DEV_IMAGE_TAG}"
+                    docker.withRegistry("${ECR_REGISTRY}", "${ECR_CREDENTIALS}") {
+                        sh '''
+                            set -e
 
-                    withCredentials([
-                        [$class: 'AmazonWebServicesCredentialsBinding',
-                         credentialsId: AWS_CREDENTIALS]
-                    ]) {
-                        sh """
-                            aws eks update-kubeconfig \
-                            --name ${DEV_CLUSTER} \
-                            --region ${AWS_REGION}
+                            kubectl apply -n "${NAMESPACE}" -f db-storageclass.yaml
+                            kubectl apply -n "${NAMESPACE}" -f db-secret.yaml
+                            kubectl apply -n "${NAMESPACE}" -f db-configmap.yaml
+                            kubectl apply -n "${NAMESPACE}" -f db-pvc.yaml
+                            kubectl apply -n "${NAMESPACE}" -f db-deployment.yaml
+                            kubectl apply -n "${NAMESPACE}" -f db-service.yaml
 
-                            kubectl create namespace ${DEV_NAMESPACE} \
-                            --dry-run=client \
-                            -o yaml | kubectl apply -f -
+                            kubectl set image \
+                                deployment/"${DB_DEPLOYMENT}" \
+                                "${DB_CONTAINER}"="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR_REPO}:${DEV_TAG}" \
+                                -n "${NAMESPACE}"
 
-                            kubectl apply \
-                            -f APP-1/kube/db-storageclass.yaml
+                            kubectl rollout status \
+                                deployment/"${DB_DEPLOYMENT}" \
+                                -n "${NAMESPACE}" \
+                                --timeout=10m
 
-                            kubectl apply \
-                            -f APP-1/kube/db-secret.yaml \
-                            -n ${DEV_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-configmap.yaml \
-                            -n ${DEV_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-pvc.yaml \
-                            -n ${DEV_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-deployment.yaml \
-                            -n ${DEV_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-service.yaml \
-                            -n ${DEV_NAMESPACE}
-
-                            kubectl -n ${DEV_NAMESPACE} \
-                            set image deployment/mysql \
-                            mysql=${image}
-
-                            kubectl -n ${DEV_NAMESPACE} \
-                            rollout status deployment/mysql \
-                            --timeout=300s
-
-                            kubectl -n ${DEV_NAMESPACE} get pods
-                            kubectl -n ${DEV_NAMESPACE} get svc
-                            kubectl -n ${DEV_NAMESPACE} get pvc
-                        """
+                            kubectl get storageclass
+                            kubectl get secret -n "${NAMESPACE}"
+                            kubectl get configmap -n "${NAMESPACE}"
+                            kubectl get pvc -n "${NAMESPACE}"
+                            kubectl get deployment "${DB_DEPLOYMENT}" -n "${NAMESPACE}"
+                            kubectl get service "${DB_SERVICE}" -n "${NAMESPACE}"
+                            kubectl get pods -n "${NAMESPACE}" -o wide
+                        '''
                     }
                 }
             }
         }
 
-        stage('Promote DEV Image to QA') {
+        stage('Promote DEV → QA') {
             when {
                 expression {
                     params.ENVIRONMENT == 'qa'
@@ -159,99 +224,60 @@ pipeline {
             }
             steps {
                 script {
-                    if (!params.DEV_IMAGE_TAG?.trim()) {
-                        error('DEV_IMAGE_TAG is required for QA deployment')
+                    docker.withRegistry("${ECR_REGISTRY}", "${ECR_CREDENTIALS}") {
+                        sh '''
+                            set -e
+
+                            SOURCE_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR_REPO}:${DEV_TAG}"
+                            TARGET_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${QA_ECR_REPO}:${DEPLOY_TAG}"
+
+                            docker pull "${SOURCE_IMAGE}"
+                            docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+                            docker push "${TARGET_IMAGE}"
+
+                            docker rmi "${SOURCE_IMAGE}" "${TARGET_IMAGE}" || true
+                        '''
                     }
-
-                    def sourceImage = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR}:${params.DEV_IMAGE_TAG}"
-                    def targetImage = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${QA_ECR}:QA-${params.DEV_IMAGE_TAG.replaceFirst('^DEV-', '')}"
-
-                    env.TARGET_IMAGE = targetImage
-
-                    docker.withRegistry(ECR_REGISTRY, ECR_CREDENTIALS) {
-                        sh """
-                            docker pull ${sourceImage}
-
-                            docker tag \
-                            ${sourceImage} \
-                            ${targetImage}
-
-                            docker push ${targetImage}
-
-                            docker image rm ${sourceImage} || true
-                            docker image rm ${targetImage} || true
-                        """
-                    }
-
-                    echo "QA image pushed: ${targetImage}"
                 }
             }
         }
 
-        stage('Deploy QA') {
+        stage('Deploy DB - QA') {
             when {
                 expression {
                     params.ENVIRONMENT == 'qa'
                 }
             }
             steps {
-                script {
-                    def image = env.TARGET_IMAGE
+                sh '''
+                    set -e
 
-                    withCredentials([
-                        [$class: 'AmazonWebServicesCredentialsBinding',
-                         credentialsId: AWS_CREDENTIALS]
-                    ]) {
-                        sh """
-                            aws eks update-kubeconfig \
-                            --name ${QA_CLUSTER} \
-                            --region ${AWS_REGION}
+                    kubectl apply -n "${NAMESPACE}" -f db-storageclass.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-secret.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-configmap.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-pvc.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-deployment.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-service.yaml
 
-                            kubectl create namespace ${QA_NAMESPACE} \
-                            --dry-run=client \
-                            -o yaml | kubectl apply -f -
+                    kubectl set image \
+                        deployment/"${DB_DEPLOYMENT}" \
+                        "${DB_CONTAINER}"="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${QA_ECR_REPO}:${DEPLOY_TAG}" \
+                        -n "${NAMESPACE}"
 
-                            kubectl apply \
-                            -f APP-1/kube/db-storageclass.yaml
+                    kubectl rollout status \
+                        deployment/"${DB_DEPLOYMENT}" \
+                        -n "${NAMESPACE}" \
+                        --timeout=10m
 
-                            kubectl apply \
-                            -f APP-1/kube/db-secret.yaml \
-                            -n ${QA_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-configmap.yaml \
-                            -n ${QA_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-pvc.yaml \
-                            -n ${QA_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-deployment.yaml \
-                            -n ${QA_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-service.yaml \
-                            -n ${QA_NAMESPACE}
-
-                            kubectl -n ${QA_NAMESPACE} \
-                            set image deployment/mysql \
-                            mysql=${image}
-
-                            kubectl -n ${QA_NAMESPACE} \
-                            rollout status deployment/mysql \
-                            --timeout=300s
-
-                            kubectl -n ${QA_NAMESPACE} get pods
-                            kubectl -n ${QA_NAMESPACE} get svc
-                            kubectl -n ${QA_NAMESPACE} get pvc
-                        """
-                    }
-                }
+                    kubectl get pvc -n "${NAMESPACE}"
+                    kubectl get deployment "${DB_DEPLOYMENT}" -n "${NAMESPACE}"
+                    kubectl get service "${DB_SERVICE}" -n "${NAMESPACE}"
+                    kubectl get pods -n "${NAMESPACE}" -o wide
+                '''
             }
         }
 
-        stage('Promote DEV Image to UAT') {
+        stage('Promote QA → UAT') {
             when {
                 expression {
                     params.ENVIRONMENT == 'uat'
@@ -259,95 +285,57 @@ pipeline {
             }
             steps {
                 script {
-                    if (!params.DEV_IMAGE_TAG?.trim()) {
-                        error('DEV_IMAGE_TAG is required for UAT deployment')
+                    docker.withRegistry("${ECR_REGISTRY}", "${ECR_CREDENTIALS}") {
+                        sh '''
+                            set -e
+
+                            SOURCE_TAG="${DEV_TAG}"
+                            SOURCE_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${QA_ECR_REPO}:QA-${SOURCE_TAG.replaceFirst('DEV-', '')}"
+                            TARGET_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${UAT_ECR_REPO}:${DEPLOY_TAG}"
+
+                            docker pull "${SOURCE_IMAGE}"
+                            docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+                            docker push "${TARGET_IMAGE}"
+
+                            docker rmi "${SOURCE_IMAGE}" "${TARGET_IMAGE}" || true
+                        '''
                     }
-
-                    def sourceImage = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR}:${params.DEV_IMAGE_TAG}"
-                    def targetImage = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${UAT_ECR}:UAT-${params.DEV_IMAGE_TAG.replaceFirst('^DEV-', '')}"
-
-                    env.TARGET_IMAGE = targetImage
-
-                    docker.withRegistry(ECR_REGISTRY, ECR_CREDENTIALS) {
-                        sh """
-                            docker pull ${sourceImage}
-
-                            docker tag \
-                            ${sourceImage} \
-                            ${targetImage}
-
-                            docker push ${targetImage}
-
-                            docker image rm ${sourceImage} || true
-                            docker image rm ${targetImage} || true
-                        """
-                    }
-
-                    echo "UAT image pushed: ${targetImage}"
                 }
             }
         }
 
-        stage('Deploy UAT') {
+        stage('Deploy DB - UAT') {
             when {
                 expression {
                     params.ENVIRONMENT == 'uat'
                 }
             }
             steps {
-                script {
-                    def image = env.TARGET_IMAGE
+                sh '''
+                    set -e
 
-                    withCredentials([
-                        [$class: 'AmazonWebServicesCredentialsBinding',
-                         credentialsId: AWS_CREDENTIALS]
-                    ]) {
-                        sh """
-                            aws eks update-kubeconfig \
-                            --name ${UAT_CLUSTER} \
-                            --region ${AWS_REGION}
+                    kubectl apply -n "${NAMESPACE}" -f db-storageclass.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-secret.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-configmap.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-pvc.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-deployment.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-service.yaml
 
-                            kubectl create namespace ${UAT_NAMESPACE} \
-                            --dry-run=client \
-                            -o yaml | kubectl apply -f -
+                    kubectl set image \
+                        deployment/"${DB_DEPLOYMENT}" \
+                        "${DB_CONTAINER}"="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${UAT_ECR_REPO}:${DEPLOY_TAG}" \
+                        -n "${NAMESPACE}"
 
-                            kubectl apply \
-                            -f APP-1/kube/db-storageclass.yaml
+                    kubectl rollout status \
+                        deployment/"${DB_DEPLOYMENT}" \
+                        -n "${NAMESPACE}" \
+                        --timeout=10m
 
-                            kubectl apply \
-                            -f APP-1/kube/db-secret.yaml \
-                            -n ${UAT_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-configmap.yaml \
-                            -n ${UAT_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-pvc.yaml \
-                            -n ${UAT_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-deployment.yaml \
-                            -n ${UAT_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-service.yaml \
-                            -n ${UAT_NAMESPACE}
-
-                            kubectl -n ${UAT_NAMESPACE} \
-                            set image deployment/mysql \
-                            mysql=${image}
-
-                            kubectl -n ${UAT_NAMESPACE} \
-                            rollout status deployment/mysql \
-                            --timeout=300s
-
-                            kubectl -n ${UAT_NAMESPACE} get pods
-                            kubectl -n ${UAT_NAMESPACE} get svc
-                            kubectl -n ${UAT_NAMESPACE} get pvc
-                        """
-                    }
-                }
+                    kubectl get pvc -n "${NAMESPACE}"
+                    kubectl get deployment "${DB_DEPLOYMENT}" -n "${NAMESPACE}"
+                    kubectl get service "${DB_SERVICE}" -n "${NAMESPACE}"
+                    kubectl get pods -n "${NAMESPACE}" -o wide
+                '''
             }
         }
 
@@ -358,11 +346,16 @@ pipeline {
                 }
             }
             steps {
-                input message: 'Approve deployment to PROD?', ok: 'Deploy PROD'
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: "Deploy DB image ${DEV_TAG} to PROD?",
+                        ok: 'Deploy to PROD'
+                    )
+                }
             }
         }
 
-        stage('Promote DEV Image to PROD') {
+        stage('Promote UAT → PROD') {
             when {
                 expression {
                     params.ENVIRONMENT == 'prod'
@@ -370,95 +363,57 @@ pipeline {
             }
             steps {
                 script {
-                    if (!params.DEV_IMAGE_TAG?.trim()) {
-                        error('DEV_IMAGE_TAG is required for PROD deployment')
+                    docker.withRegistry("${ECR_REGISTRY}", "${ECR_CREDENTIALS}") {
+                        sh '''
+                            set -e
+
+                            SOURCE_TAG="UAT-${DEV_TAG.replaceFirst('DEV-', '')}"
+                            SOURCE_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${UAT_ECR_REPO}:${SOURCE_TAG}"
+                            TARGET_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${PROD_ECR_REPO}:${DEPLOY_TAG}"
+
+                            docker pull "${SOURCE_IMAGE}"
+                            docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+                            docker push "${TARGET_IMAGE}"
+
+                            docker rmi "${SOURCE_IMAGE}" "${TARGET_IMAGE}" || true
+                        '''
                     }
-
-                    def sourceImage = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR}:${params.DEV_IMAGE_TAG}"
-                    def targetImage = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${PROD_ECR}:PROD-${params.DEV_IMAGE_TAG.replaceFirst('^DEV-', '')}"
-
-                    env.TARGET_IMAGE = targetImage
-
-                    docker.withRegistry(ECR_REGISTRY, ECR_CREDENTIALS) {
-                        sh """
-                            docker pull ${sourceImage}
-
-                            docker tag \
-                            ${sourceImage} \
-                            ${targetImage}
-
-                            docker push ${targetImage}
-
-                            docker image rm ${sourceImage} || true
-                            docker image rm ${targetImage} || true
-                        """
-                    }
-
-                    echo "PROD image pushed: ${targetImage}"
                 }
             }
         }
 
-        stage('Deploy PROD') {
+        stage('Deploy DB - PROD') {
             when {
                 expression {
                     params.ENVIRONMENT == 'prod'
                 }
             }
             steps {
-                script {
-                    def image = env.TARGET_IMAGE
+                sh '''
+                    set -e
 
-                    withCredentials([
-                        [$class: 'AmazonWebServicesCredentialsBinding',
-                         credentialsId: AWS_CREDENTIALS]
-                    ]) {
-                        sh """
-                            aws eks update-kubeconfig \
-                            --name ${PROD_CLUSTER} \
-                            --region ${AWS_REGION}
+                    kubectl apply -n "${NAMESPACE}" -f db-storageclass.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-secret.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-configmap.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-pvc.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-deployment.yaml
+                    kubectl apply -n "${NAMESPACE}" -f db-service.yaml
 
-                            kubectl create namespace ${PROD_NAMESPACE} \
-                            --dry-run=client \
-                            -o yaml | kubectl apply -f -
+                    kubectl set image \
+                        deployment/"${DB_DEPLOYMENT}" \
+                        "${DB_CONTAINER}"="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${PROD_ECR_REPO}:${DEPLOY_TAG}" \
+                        -n "${NAMESPACE}"
 
-                            kubectl apply \
-                            -f APP-1/kube/db-storageclass.yaml
+                    kubectl rollout status \
+                        deployment/"${DB_DEPLOYMENT}" \
+                        -n "${NAMESPACE}" \
+                        --timeout=10m
 
-                            kubectl apply \
-                            -f APP-1/kube/db-secret.yaml \
-                            -n ${PROD_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-configmap.yaml \
-                            -n ${PROD_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-pvc.yaml \
-                            -n ${PROD_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-deployment.yaml \
-                            -n ${PROD_NAMESPACE}
-
-                            kubectl apply \
-                            -f APP-1/kube/db-service.yaml \
-                            -n ${PROD_NAMESPACE}
-
-                            kubectl -n ${PROD_NAMESPACE} \
-                            set image deployment/mysql \
-                            mysql=${image}
-
-                            kubectl -n ${PROD_NAMESPACE} \
-                            rollout status deployment/mysql \
-                            --timeout=300s
-
-                            kubectl -n ${PROD_NAMESPACE} get pods
-                            kubectl -n ${PROD_NAMESPACE} get svc
-                            kubectl -n ${PROD_NAMESPACE} get pvc
-                        """
-                    }
-                }
+                    kubectl get pvc -n "${NAMESPACE}"
+                    kubectl get deployment "${DB_DEPLOYMENT}" -n "${NAMESPACE}"
+                    kubectl get service "${DB_SERVICE}" -n "${NAMESPACE}"
+                    kubectl get pods -n "${NAMESPACE}" -o wide
+                '''
             }
         }
     }
