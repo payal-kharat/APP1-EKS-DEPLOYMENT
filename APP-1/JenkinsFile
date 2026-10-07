@@ -1,0 +1,231 @@
+@Library('app-shared-library') _
+
+pipeline {
+
+    agent any
+
+    environment {
+
+        FRONTEND_IMAGE = "docker.io/payalkharat/jenkins-demo-frontend"
+        BACKEND_IMAGE  = "docker.io/payalkharat/jenkins-demo-backend"
+        DB_IMAGE       = "docker.io/payalkharat/jenkins-demo-db"
+
+        IMAGE_TAG = "${BUILD_NUMBER}"
+
+        EKS_CLUSTER = "cluster-1"
+        AWS_REGION  = "us-east-1"
+    }
+
+    stages {
+
+        stage('Checkout') {
+
+            steps {
+
+                checkout scm
+            }
+        }
+
+        stage('Docker Login') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'Docker-hub-id',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+                    '''
+                }
+            }
+        }
+
+        stage('DEV - Build Images') {
+
+            steps {
+
+                script {
+
+                    dockerBuildPush(
+                        FRONTEND_IMAGE,
+                        IMAGE_TAG,
+                        'APP-1/nginx-flask-mysql/proxy/Dockerfile',
+                        'APP-1/nginx-flask-mysql/proxy/'
+                    )
+
+                    dockerBuildPush(
+                        BACKEND_IMAGE,
+                        IMAGE_TAG,
+                        'APP-1/nginx-flask-mysql/backend/Dockerfile',
+                        'APP-1/nginx-flask-mysql/backend/'
+                    )
+
+                    dockerBuildPush(
+                        DB_IMAGE,
+                        IMAGE_TAG,
+                        'APP-1/nginx-flask-mysql/db/Dockerfile',
+                        'APP-1/nginx-flask-mysql/db/'
+                    )
+                }
+            }
+        }
+
+        stage('DEV - Deploy') {
+
+            steps {
+
+                script {
+
+                    deployToEKS(
+                        'dev',
+                        'frontend',
+                        'frontend',
+                        "${FRONTEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/frontend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'dev',
+                        'backend',
+                        'backend',
+                        "${BACKEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/backend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'dev',
+                        'mysql',
+                        'mysql',
+                        "${DB_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/db-deployment.yaml'
+                    )
+                }
+            }
+        }
+
+        stage('QA - Deploy') {
+
+            steps {
+
+                script {
+                    deployToEKS(
+                        'qa',
+                        'frontend',
+                        'frontend',
+                        "${FRONTEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/frontend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'qa',
+                        'backend',
+                        'backend',
+                        "${BACKEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/backend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'qa',
+                        'mysql',
+                        'mysql',
+                        "${DB_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/db-deployment.yaml'
+                    )
+                }
+            }
+        }
+
+        stage('UAT - Deploy') {
+
+            steps {
+
+                script {
+                    deployToEKS(
+                        'uat',
+                        'frontend',
+                        'frontend',
+                        "${FRONTEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/frontend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'uat',
+                        'backend',
+                        'backend',
+                        "${BACKEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/backend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'uat',
+                        'mysql',
+                        'mysql',
+                        "${DB_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/db-deployment.yaml'
+                    )
+                }
+            }
+        }
+
+        stage('Production Approval') {
+
+            steps {
+
+                input(
+                    message: "Deploy build ${BUILD_NUMBER} to Production?",
+                    ok: "Deploy to Production"
+                )
+            }
+        }
+
+        stage('PROD - Deploy') {
+
+            steps {
+
+                script {
+
+                    deployToEKS(
+                        'prod',
+                        'frontend',
+                        'frontend',
+                        "${FRONTEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/frontend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'prod',
+                        'backend',
+                        'backend',
+                        "${BACKEND_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/backend-deployment.yaml'
+                    )
+
+                    deployToEKS(
+                        'prod',
+                        'mysql',
+                        'mysql',
+                        "${DB_IMAGE}:${IMAGE_TAG}",
+                        'APP-1/kube/db-deployment.yaml'
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+
+        always {
+
+            echo "Cleaning Jenkins workspace..."
+
+            cleanWs()
+        }
+    }
+}
