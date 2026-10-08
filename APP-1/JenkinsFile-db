@@ -1,4 +1,4 @@
-
+```groovy
 pipeline {
     agent any
 
@@ -12,6 +12,7 @@ pipeline {
             choices: ['dev', 'qa', 'uat', 'prod'],
             description: 'Select the deployment environment'
         )
+
         string(
             name: 'DEV_IMAGE_TAG',
             defaultValue: '',
@@ -26,7 +27,7 @@ pipeline {
         AWS_ACCOUNT_ID = '552940445807'
 
         ECR_REGISTRY = 'https://552940445807.dkr.ecr.us-east-1.amazonaws.com'
-        // ECR_CREDENTIALS = 'ECR'
+        ECR_CREDENTIALS = 'ECR'
 
         DEV_ECR_REPO = 'app-1-dev-db'
         QA_ECR_REPO = 'app-1-qa-db'
@@ -44,12 +45,6 @@ pipeline {
     }
 
     stages {
-
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
 
         stage('Get Commit ID') {
             steps {
@@ -235,6 +230,7 @@ def getCommitId() {
 
     if (params.ENVIRONMENT == 'dev') {
         env.DEV_TAG = "DEV-${env.COMMIT_ID}"
+
         echo "DEV IMAGE TAG: ${env.DEV_TAG}"
     } else {
         if (!params.DEV_IMAGE_TAG?.trim()) {
@@ -246,6 +242,7 @@ def getCommitId() {
         }
 
         env.DEV_TAG = params.DEV_IMAGE_TAG.trim()
+
         echo "PROMOTING EXISTING DEV IMAGE: ${env.DEV_TAG}"
     }
 }
@@ -253,25 +250,33 @@ def getCommitId() {
 
 def setEnvironment() {
     if (params.ENVIRONMENT == 'dev') {
+
         env.CLUSTER_NAME = env.DEV_CLUSTER
         env.ECR_REPO = env.DEV_ECR_REPO
         env.NAMESPACE = 'dev'
         env.DEPLOY_TAG = env.DEV_TAG
+
     } else if (params.ENVIRONMENT == 'qa') {
+
         env.CLUSTER_NAME = env.QA_CLUSTER
         env.ECR_REPO = env.QA_ECR_REPO
         env.NAMESPACE = 'qa'
         env.DEPLOY_TAG = "QA-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+
     } else if (params.ENVIRONMENT == 'uat') {
+
         env.CLUSTER_NAME = env.UAT_CLUSTER
         env.ECR_REPO = env.UAT_ECR_REPO
         env.NAMESPACE = 'uat'
         env.DEPLOY_TAG = "UAT-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+
     } else if (params.ENVIRONMENT == 'prod') {
+
         env.CLUSTER_NAME = env.PROD_CLUSTER
         env.ECR_REPO = env.PROD_ECR_REPO
         env.NAMESPACE = 'prod'
         env.DEPLOY_TAG = "PROD-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+
     } else {
         error("Invalid environment: ${params.ENVIRONMENT}")
     }
@@ -282,8 +287,6 @@ def setEnvironment() {
     echo "ECR REPO    : ${env.ECR_REPO}"
     echo "DEPLOY TAG  : ${env.DEPLOY_TAG}"
 }
-
-
 def connectToEKS() {
     withCredentials([
         [$class: 'AmazonWebServicesCredentialsBinding',
@@ -308,24 +311,25 @@ def connectToEKS() {
         '''
     }
 }
-
-
 def createNamespace() {
-    sh '''
-        set -e
+    withCredentials([
+        [$class: 'AmazonWebServicesCredentialsBinding',
+         credentialsId: "${env.AWS_CREDENTIALS}"]
+    ]) {
+        sh '''
+            set -e
 
-        echo "Creating namespace: ${NAMESPACE}"
+            echo "Creating namespace: ${NAMESPACE}"
 
-        kubectl create namespace "${NAMESPACE}" \
-            --dry-run=client \
-            -o yaml | kubectl apply -f -
+            kubectl create namespace "${NAMESPACE}" \
+                --dry-run=client \
+                -o yaml | kubectl apply -f -
 
-        echo "Namespace:"
-        kubectl get namespace "${NAMESPACE}"
-    '''
+            echo "Namespace:"
+            kubectl get namespace "${NAMESPACE}"
+        '''
+    }
 }
-
-
 def buildDBImage() {
     docker.withRegistry(
         "${env.ECR_REGISTRY}",
@@ -353,63 +357,99 @@ def buildDBImage() {
 
 
 def deployDB(String environmentRepo) {
-    sh """
-        set -e
+    withCredentials([
+        [$class: 'AmazonWebServicesCredentialsBinding',
+         credentialsId: "${env.AWS_CREDENTIALS}"]
+    ]) {
+        sh """
+            set -e
 
-        IMAGE="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${environmentRepo}:${env.DEPLOY_TAG}"
+            IMAGE="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${environmentRepo}:${env.DEPLOY_TAG}"
 
-        echo "Deploying DB image:"
-        echo "\${IMAGE}"
+            echo "Deploying DB image:"
+            echo "\${IMAGE}"
 
-        echo "Applying StorageClass..."
-        kubectl apply -n "${env.NAMESPACE}" -f db-storageclass.yaml
+            echo "Applying StorageClass..."
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f db-storageclass.yaml
 
-        echo "Applying Secret..."
-        kubectl apply -n "${env.NAMESPACE}" -f db-secret.yaml
+            echo "Applying Secret..."
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f db-secret.yaml
 
-        echo "Applying ConfigMap..."
-        kubectl apply -n "${env.NAMESPACE}" -f db-configmap.yaml
+            echo "Applying ConfigMap..."
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f db-configmap.yaml
 
-        echo "Applying PVC..."
-        kubectl apply -n "${env.NAMESPACE}" -f db-pvc.yaml
+            echo "Applying PVC..."
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f db-pvc.yaml
 
-        echo "Applying Deployment..."
-        kubectl apply -n "${env.NAMESPACE}" -f db-deployment.yaml
+            echo "Applying Deployment..."
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f db-deployment.yaml
 
-        echo "Applying Service..."
-        kubectl apply -n "${env.NAMESPACE}" -f db-service.yaml
+            echo "Applying Service..."
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f db-service.yaml
 
-        echo "Updating DB image..."
-        kubectl set image deployment/${env.DB_DEPLOYMENT} ${env.DB_CONTAINER}="\${IMAGE}" -n "${env.NAMESPACE}"
+            echo "Updating DB image..."
+            kubectl set image \
+                deployment/${env.DB_DEPLOYMENT} \
+                ${env.DB_CONTAINER}="\${IMAGE}" \
+                -n "${env.NAMESPACE}"
 
-        echo "Waiting for deployment rollout..."
-        kubectl rollout status deployment/${env.DB_DEPLOYMENT} -n "${env.NAMESPACE}" --timeout=10m
+            echo "Waiting for deployment rollout..."
+            kubectl rollout status \
+                deployment/${env.DB_DEPLOYMENT} \
+                -n "${env.NAMESPACE}" \
+                --timeout=10m
 
-        echo "StorageClass:"
-        kubectl get storageclass
+            echo "StorageClass:"
+            kubectl get storageclass
 
-        echo "Secret:"
-        kubectl get secret -n "${env.NAMESPACE}"
+            echo "Secret:"
+            kubectl get secret \
+                -n "${env.NAMESPACE}"
 
-        echo "ConfigMap:"
-        kubectl get configmap -n "${env.NAMESPACE}"
+            echo "ConfigMap:"
+            kubectl get configmap \
+                -n "${env.NAMESPACE}"
 
-        echo "PVC:"
-        kubectl get pvc -n "${env.NAMESPACE}"
+            echo "PVC:"
+            kubectl get pvc \
+                -n "${env.NAMESPACE}"
 
-        echo "Deployment:"
-        kubectl get deployment "${env.DB_DEPLOYMENT}" -n "${env.NAMESPACE}"
+            echo "Deployment:"
+            kubectl get deployment \
+                "${env.DB_DEPLOYMENT}" \
+                -n "${env.NAMESPACE}"
 
-        echo "Service:"
-        kubectl get service "${env.DB_SERVICE}" -n "${env.NAMESPACE}"
+            echo "Service:"
+            kubectl get service \
+                "${env.DB_SERVICE}" \
+                -n "${env.NAMESPACE}"
 
-        echo "Pods:"
-        kubectl get pods -n "${env.NAMESPACE}" -o wide
-    """
+            echo "Pods:"
+            kubectl get pods \
+                -n "${env.NAMESPACE}" \
+                -o wide
+        """
+    }
 }
 
-
-def promoteImage(String sourceRepo, String sourceTag, String targetRepo, String targetTag) {
+def promoteImage(
+    String sourceRepo,
+    String sourceTag,
+    String targetRepo,
+    String targetTag
+) {
     docker.withRegistry(
         "${env.ECR_REGISTRY}",
         "${env.ECR_CREDENTIALS}"
@@ -437,12 +477,12 @@ def promoteImage(String sourceRepo, String sourceTag, String targetRepo, String 
 
             echo "Image promotion completed successfully."
 
-            docker rmi "\${SOURCE_IMAGE}" "\${TARGET_IMAGE}" || true
+            docker rmi \
+                "\${SOURCE_IMAGE}" \
+                "\${TARGET_IMAGE}" || true
         """
     }
 }
-
-
 def productionApproval() {
     timeout(time: 30, unit: 'MINUTES') {
         input(
