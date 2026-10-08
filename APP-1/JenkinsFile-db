@@ -39,7 +39,8 @@ pipeline {
         DB_CONTAINER = 'mysql'
         DB_SERVICE = 'app1-db'
 
-        DB_PATH = 'APP-1/nginx-flask-mysql/db'
+        DB_DOCKER_PATH = 'APP-1/nginx-flask-mysql/db'
+        KUBE_PATH = 'APP-1/kube'
     }
 
     stages {
@@ -224,6 +225,7 @@ pipeline {
 }
 
 def getCommitId() {
+
     env.COMMIT_ID = sh(
         script: 'git rev-parse --short HEAD',
         returnStdout: true
@@ -232,10 +234,13 @@ def getCommitId() {
     echo "COMMIT ID: ${env.COMMIT_ID}"
 
     if (params.ENVIRONMENT == 'dev') {
+
         env.DEV_TAG = "DEV-${env.COMMIT_ID}"
 
         echo "DEV IMAGE TAG: ${env.DEV_TAG}"
+
     } else {
+
         if (!params.DEV_IMAGE_TAG?.trim()) {
             error("DEV_IMAGE_TAG is required for ${params.ENVIRONMENT}")
         }
@@ -371,12 +376,16 @@ def buildDBImage() {
                 --password-stdin "${REGISTRY}"
 
             echo "Building DB image..."
-            echo "Docker build context: ${DB_PATH}"
-            echo "Image: ${IMAGE}"
+
+            echo "Docker build path:"
+            echo "${DB_DOCKER_PATH}"
+
+            echo "Image:"
+            echo "${IMAGE}"
 
             docker build \
                 -t "${IMAGE}" \
-                "${DB_PATH}"
+                "${DB_DOCKER_PATH}"
 
             echo "Pushing DB image..."
 
@@ -405,46 +414,49 @@ def deployDB(String environmentRepo) {
 
             IMAGE="\${REGISTRY}/${environmentRepo}:${env.DEPLOY_TAG}"
 
-            DB_PATH="${env.DB_PATH}"
+            KUBE_PATH="${env.KUBE_PATH}"
 
             echo "Deploying DB image:"
             echo "\${IMAGE}"
+
+            echo "Kubernetes manifest path:"
+            echo "\${KUBE_PATH}"
 
             echo "Applying StorageClass..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f "\${DB_PATH}/db-storageclass.yaml"
+                -f "\${KUBE_PATH}/db-storageclass.yaml"
 
             echo "Applying Secret..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f "\${DB_PATH}/db-secret.yaml"
+                -f "\${KUBE_PATH}/db-secret.yaml"
 
             echo "Applying ConfigMap..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f "\${DB_PATH}/db-configmap.yaml"
+                -f "\${KUBE_PATH}/db-configmap.yaml"
 
             echo "Applying PVC..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f "\${DB_PATH}/db-pvc.yaml"
+                -f "\${KUBE_PATH}/db-pvc.yaml"
 
             echo "Applying Deployment..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f "\${DB_PATH}/db-deployment.yaml"
+                -f "\${KUBE_PATH}/db-deployment.yaml"
 
             echo "Applying Service..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f "\${DB_PATH}/db-service.yaml"
+                -f "\${KUBE_PATH}/db-service.yaml"
 
             echo "Updating DB image..."
 
