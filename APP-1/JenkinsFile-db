@@ -38,6 +38,8 @@ pipeline {
         DB_DEPLOYMENT = 'mysql'
         DB_CONTAINER = 'mysql'
         DB_SERVICE = 'app1-db'
+
+        DB_PATH = 'APP-1/nginx-flask-mysql/db'
     }
 
     stages {
@@ -221,9 +223,7 @@ pipeline {
     }
 }
 
-
 def getCommitId() {
-
     env.COMMIT_ID = sh(
         script: 'git rev-parse --short HEAD',
         returnStdout: true
@@ -232,13 +232,10 @@ def getCommitId() {
     echo "COMMIT ID: ${env.COMMIT_ID}"
 
     if (params.ENVIRONMENT == 'dev') {
-
         env.DEV_TAG = "DEV-${env.COMMIT_ID}"
 
         echo "DEV IMAGE TAG: ${env.DEV_TAG}"
-
     } else {
-
         if (!params.DEV_IMAGE_TAG?.trim()) {
             error("DEV_IMAGE_TAG is required for ${params.ENVIRONMENT}")
         }
@@ -254,7 +251,6 @@ def getCommitId() {
         echo "PROMOTING EXISTING DEV IMAGE: ${env.DEV_TAG}"
     }
 }
-
 
 def setEnvironment() {
 
@@ -287,7 +283,6 @@ def setEnvironment() {
         env.DEPLOY_TAG = "PROD-${env.DEV_TAG.replaceFirst('DEV-', '')}"
 
     } else {
-
         error("Invalid environment: ${params.ENVIRONMENT}")
     }
 
@@ -298,23 +293,22 @@ def setEnvironment() {
     echo "DEPLOY TAG  : ${env.DEPLOY_TAG}"
 }
 
-
 def connectToEKS() {
 
     withCredentials([
-        [$class: 'AmazonWebServicesCredentialsBinding',
-         credentialsId: "${env.AWS_CREDENTIALS}"]
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
     ]) {
 
         sh '''
             set -e
 
             echo "Checking AWS credentials..."
-
             aws sts get-caller-identity
 
             echo "Connecting to EKS..."
-
             echo "Cluster: ${CLUSTER_NAME}"
             echo "Region : ${AWS_REGION}"
 
@@ -323,18 +317,18 @@ def connectToEKS() {
                 --region "${AWS_REGION}"
 
             echo "Kubernetes nodes:"
-
             kubectl get nodes
         '''
     }
 }
 
-
 def createNamespace() {
 
     withCredentials([
-        [$class: 'AmazonWebServicesCredentialsBinding',
-         credentialsId: "${env.AWS_CREDENTIALS}"]
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
     ]) {
 
         sh '''
@@ -347,18 +341,18 @@ def createNamespace() {
                 -o yaml | kubectl apply -f -
 
             echo "Namespace:"
-
             kubectl get namespace "${NAMESPACE}"
         '''
     }
 }
 
-
 def buildDBImage() {
 
     withCredentials([
-        [$class: 'AmazonWebServicesCredentialsBinding',
-         credentialsId: "${env.AWS_CREDENTIALS}"]
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
     ]) {
 
         sh '''
@@ -376,17 +370,15 @@ def buildDBImage() {
                 --username AWS \
                 --password-stdin "${REGISTRY}"
 
-            echo "Building DB image:"
-
-            echo "${IMAGE}"
+            echo "Building DB image..."
+            echo "Docker build context: ${DB_PATH}"
+            echo "Image: ${IMAGE}"
 
             docker build \
                 -t "${IMAGE}" \
-                .
+                "${DB_PATH}"
 
-            echo "Pushing DB image:"
-
-            echo "${IMAGE}"
+            echo "Pushing DB image..."
 
             docker push "${IMAGE}"
 
@@ -397,12 +389,13 @@ def buildDBImage() {
     }
 }
 
-
 def deployDB(String environmentRepo) {
 
     withCredentials([
-        [$class: 'AmazonWebServicesCredentialsBinding',
-         credentialsId: "${env.AWS_CREDENTIALS}"]
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
     ]) {
 
         sh """
@@ -412,45 +405,46 @@ def deployDB(String environmentRepo) {
 
             IMAGE="\${REGISTRY}/${environmentRepo}:${env.DEPLOY_TAG}"
 
-            echo "Deploying DB image:"
+            DB_PATH="${env.DB_PATH}"
 
+            echo "Deploying DB image:"
             echo "\${IMAGE}"
 
             echo "Applying StorageClass..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f db-storageclass.yaml
+                -f "\${DB_PATH}/db-storageclass.yaml"
 
             echo "Applying Secret..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f db-secret.yaml
+                -f "\${DB_PATH}/db-secret.yaml"
 
             echo "Applying ConfigMap..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f db-configmap.yaml
+                -f "\${DB_PATH}/db-configmap.yaml"
 
             echo "Applying PVC..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f db-pvc.yaml
+                -f "\${DB_PATH}/db-pvc.yaml"
 
             echo "Applying Deployment..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f db-deployment.yaml
+                -f "\${DB_PATH}/db-deployment.yaml"
 
             echo "Applying Service..."
 
             kubectl apply \
                 -n "${env.NAMESPACE}" \
-                -f db-service.yaml
+                -f "\${DB_PATH}/db-service.yaml"
 
             echo "Updating DB image..."
 
@@ -467,45 +461,37 @@ def deployDB(String environmentRepo) {
                 --timeout=10m
 
             echo "StorageClass:"
-
             kubectl get storageclass
 
             echo "Secret:"
-
             kubectl get secret \
                 -n "${env.NAMESPACE}"
 
             echo "ConfigMap:"
-
             kubectl get configmap \
                 -n "${env.NAMESPACE}"
 
             echo "PVC:"
-
             kubectl get pvc \
                 -n "${env.NAMESPACE}"
 
             echo "Deployment:"
-
             kubectl get deployment \
                 "${env.DB_DEPLOYMENT}" \
                 -n "${env.NAMESPACE}"
 
             echo "Service:"
-
             kubectl get service \
                 "${env.DB_SERVICE}" \
                 -n "${env.NAMESPACE}"
 
             echo "Pods:"
-
             kubectl get pods \
                 -n "${env.NAMESPACE}" \
                 -o wide
         """
     }
 }
-
 
 def promoteImage(
     String sourceRepo,
@@ -515,8 +501,10 @@ def promoteImage(
 ) {
 
     withCredentials([
-        [$class: 'AmazonWebServicesCredentialsBinding',
-         credentialsId: "${env.AWS_CREDENTIALS}"]
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
     ]) {
 
         sh """
@@ -537,11 +525,9 @@ def promoteImage(
                 --password-stdin "\${REGISTRY}"
 
             echo "Source image:"
-
             echo "\${SOURCE_IMAGE}"
 
             echo "Target image:"
-
             echo "\${TARGET_IMAGE}"
 
             echo "Pulling source image..."
@@ -569,7 +555,6 @@ def promoteImage(
     }
 }
 
-
 def productionApproval() {
 
     timeout(time: 30, unit: 'MINUTES') {
@@ -580,4 +565,3 @@ def productionApproval() {
         )
     }
 }
-
