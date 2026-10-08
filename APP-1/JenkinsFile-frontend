@@ -1,439 +1,540 @@
 
 pipeline {
-
     agent any
 
-    environment {
-
-        DEV_REGISTRY =
-            "docker.io/payalkharat/jenkins-frontend-dev"
-
-        QA_REGISTRY =
-            "docker.io/payalkharat/jenkins-frontend-qa"
-
-        STAGE_REGISTRY =
-            "docker.io/payalkharat/jenkins-frontend-uat"
-
-        PROD_REGISTRY =
-            "docker.io/payalkharat/jenkins-frontend-prod"
-
-
-        EKS_CLUSTER = "cluster-1"
-        AWS_REGION  = "us-east-1"
-
-
-        DEV_NAMESPACE   = "dev"
-        QA_NAMESPACE    = "qa"
-        STAGE_NAMESPACE = "uat"
-        PROD_NAMESPACE  = "prod"
-
-
-        DEV_DOCKER_CREDS   = "dh_cred_dev"
-        QA_DOCKER_CREDS    = "dh_cred_qa"
-        STAGE_DOCKER_CREDS = "dh_cred_stage"
-        PROD_DOCKER_CREDS  = "dh_cred_prod"
+    options {
+        skipDefaultCheckout(true)
     }
 
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'qa', 'uat', 'prod'],
+            description: 'Select the deployment environment'
+        )
+
+        string(
+            name: 'DEV_IMAGE_TAG',
+            defaultValue: '',
+            description: 'For QA/UAT/PROD enter the existing DEV image tag, e.g. DEV-a1b2c3d'
+        )
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_CREDENTIALS = 'AWS'
+        AWS_ACCOUNT_ID = '552940445807'
+
+        DEV_ECR_REPO = 'app-1-dev-frontend'
+        QA_ECR_REPO = 'app-1-qa-frontend'
+        UAT_ECR_REPO = 'app-1-uat-frontend'
+        PROD_ECR_REPO = 'app-1-prod-frontend'
+
+        DEV_CLUSTER = 'app-1-dev-cluster'
+        QA_CLUSTER = 'app-1-qa-cluster'
+        UAT_CLUSTER = 'app-1-uat-cluster'
+        PROD_CLUSTER = 'app-1-prod-cluster'
+
+        FRONTEND_DEPLOYMENT = 'frontend'
+        FRONTEND_CONTAINER = 'frontend'
+        FRONTEND_SERVICE = 'app1-frontend'
+
+        FRONTEND_DOCKER_PATH = 'APP-1/nginx-flask-mysql/proxy'
+        KUBE_PATH = 'APP-1/kube'
+    }
 
     stages {
 
         stage('Checkout') {
-
             steps {
-
                 checkout scm
+            }
+        }
 
+        stage('Get Commit ID') {
+            steps {
                 script {
-
-                    env.COMMIT_ID = sh(
-                        script: "git rev-parse --short HEAD",
-                        returnStdout: true
-                    ).trim()
-
-                    echo "======================================"
-                    echo "COMMIT ID: ${env.COMMIT_ID}"
-                    echo "======================================"
+                    getCommitId()
                 }
             }
         }
 
+        stage('Set Environment') {
+            steps {
+                script {
+                    setEnvironment()
+                }
+            }
+        }
 
         stage('Connect to EKS') {
-
             steps {
-
-                sh """
-                    aws eks update-kubeconfig \
-                        --name ${EKS_CLUSTER} \
-                        --region ${AWS_REGION}
-
-                    kubectl get nodes
-                """
-            }
-        }
-
-
-        stage('Docker Login') {
-
-            steps {
-
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'Docker-hub-id',
-                        usernameVariable: 'DOCKER_USERNAME',
-                        passwordVariable: 'DOCKER_PASSWORD'
-                    )
-                ]) {
-
-                    sh '''
-                        echo "$DOCKER_PASSWORD" | docker login \
-                            docker.io \
-                            -u "$DOCKER_USERNAME" \
-                            --password-stdin
-                    '''
+                script {
+                    connectToEKS()
                 }
             }
         }
 
+        stage('Create Kubernetes Namespace') {
+            steps {
+                script {
+                    createNamespace()
+                }
+            }
+        }
 
         stage('Build Frontend Image') {
-
+            when {
+                expression {
+                    params.ENVIRONMENT == 'dev'
+                }
+            }
             steps {
-
                 script {
-
-                    def image =
-                        "${DEV_REGISTRY}:${COMMIT_ID}"
-
-                    sh """
-                        docker build \
-                            -f APP-1/nginx-flask-mysql/proxy/Dockerfile \
-                            -t ${image} \
-                            APP-1/nginx-flask-mysql/proxy/
-
-                        docker push ${image}
-                    """
-
-                    echo "======================================"
-                    echo "FRONTEND IMAGE BUILT AND PUSHED"
-                    echo "IMAGE: ${image}"
-                    echo "======================================"
+                    buildFrontendImage()
                 }
             }
         }
-
 
         stage('Deploy Frontend - DEV') {
-
+            when {
+                expression {
+                    params.ENVIRONMENT == 'dev'
+                }
+            }
             steps {
-
                 script {
-
-                    deployFrontend(
-                        DEV_NAMESPACE,
-                        DEV_REGISTRY,
-                        "APP-1/kube/frontend-deployment.yaml",
-                        "APP-1/kube/frontend-service.yaml"
-                    )
+                    deployFrontend(env.DEV_ECR_REPO)
                 }
             }
         }
 
-
-        stage('Promote Frontend DEV → QA') {
-
+        stage('Promote DEV → QA') {
+            when {
+                expression {
+                    params.ENVIRONMENT == 'qa'
+                }
+            }
             steps {
-
                 script {
-
                     promoteImage(
-                        "${DEV_REGISTRY}:${COMMIT_ID}",
-                        "${QA_REGISTRY}:${COMMIT_ID}",
-                        DEV_DOCKER_CREDS,
-                        QA_DOCKER_CREDS
+                        env.DEV_ECR_REPO,
+                        env.DEV_TAG,
+                        env.QA_ECR_REPO,
+                        env.DEPLOY_TAG
                     )
                 }
             }
         }
-
 
         stage('Deploy Frontend - QA') {
-
+            when {
+                expression {
+                    params.ENVIRONMENT == 'qa'
+                }
+            }
             steps {
-
                 script {
-
-                    deployFrontend(
-                        QA_NAMESPACE,
-                        QA_REGISTRY,
-                        "APP-1/kube/frontend-deployment.yaml",
-                        "APP-1/kube/frontend-service.yaml"
-                    )
+                    deployFrontend(env.QA_ECR_REPO)
                 }
             }
         }
 
-
-        stage('Promote Frontend QA → STAGE') {
-
+        stage('Promote QA → UAT') {
+            when {
+                expression {
+                    params.ENVIRONMENT == 'uat'
+                }
+            }
             steps {
-
                 script {
-
                     promoteImage(
-                        "${QA_REGISTRY}:${COMMIT_ID}",
-                        "${STAGE_REGISTRY}:${COMMIT_ID}",
-                        QA_DOCKER_CREDS,
-                        STAGE_DOCKER_CREDS
+                        env.QA_ECR_REPO,
+                        "QA-${env.DEV_TAG.replaceFirst('DEV-', '')}",
+                        env.UAT_ECR_REPO,
+                        env.DEPLOY_TAG
                     )
                 }
             }
         }
 
-
-        stage('Deploy Frontend - STAGE') {
-
+        stage('Deploy Frontend - UAT') {
+            when {
+                expression {
+                    params.ENVIRONMENT == 'uat'
+                }
+            }
             steps {
-
                 script {
-
-                    deployFrontend(
-                        STAGE_NAMESPACE,
-                        STAGE_REGISTRY,
-                        "APP-1/kube/frontend-deployment.yaml",
-                        "APP-1/kube/frontend-service.yaml"
-                    )
+                    deployFrontend(env.UAT_ECR_REPO)
                 }
             }
         }
-
 
         stage('Production Approval') {
-
+            when {
+                expression {
+                    params.ENVIRONMENT == 'prod'
+                }
+            }
             steps {
-
-                input(
-                    message: "Deploy Frontend ${COMMIT_ID} to PROD?",
-                    ok: "Deploy Frontend to PROD"
-                )
+                script {
+                    productionApproval()
+                }
             }
         }
 
-
-        stage('Promote Frontend STAGE → PROD') {
-
+        stage('Promote UAT → PROD') {
+            when {
+                expression {
+                    params.ENVIRONMENT == 'prod'
+                }
+            }
             steps {
-
                 script {
-
                     promoteImage(
-                        "${STAGE_REGISTRY}:${COMMIT_ID}",
-                        "${PROD_REGISTRY}:${COMMIT_ID}",
-                        STAGE_DOCKER_CREDS,
-                        PROD_DOCKER_CREDS
+                        env.UAT_ECR_REPO,
+                        "UAT-${env.DEV_TAG.replaceFirst('DEV-', '')}",
+                        env.PROD_ECR_REPO,
+                        env.DEPLOY_TAG
                     )
                 }
             }
         }
 
-
         stage('Deploy Frontend - PROD') {
-
+            when {
+                expression {
+                    params.ENVIRONMENT == 'prod'
+                }
+            }
             steps {
-
                 script {
-
-                    deployFrontend(
-                        PROD_NAMESPACE,
-                        PROD_REGISTRY,
-                        "APP-1/kube/frontend-deployment.yaml",
-                        "APP-1/kube/frontend-service.yaml"
-                    )
+                    deployFrontend(env.PROD_ECR_REPO)
                 }
             }
         }
     }
 
-
     post {
-
         always {
-
-            echo "Cleaning Jenkins workspace..."
-
+            echo 'Cleaning Jenkins workspace...'
             cleanWs()
         }
     }
 }
 
+def getCommitId() {
 
-/* =========================================================
-   FRONTEND DEPLOYMENT FUNCTION
-   ========================================================= */
+    env.COMMIT_ID = sh(
+        script: 'git rev-parse --short HEAD',
+        returnStdout: true
+    ).trim()
 
-def deployFrontend(
-    String namespace,
-    String registry,
-    String deploymentYaml,
-    String serviceYaml
-) {
+    echo "COMMIT ID: ${env.COMMIT_ID}"
 
-    def image =
-        "${registry}:${env.COMMIT_ID}"
+    if (params.ENVIRONMENT == 'dev') {
 
-    echo "======================================"
-    echo "DEPLOYING FRONTEND"
-    echo "======================================"
-    echo "Namespace : ${namespace}"
-    echo "Image     : ${image}"
-    echo "======================================"
+        env.DEV_TAG = "DEV-${env.COMMIT_ID}"
 
+        echo "DEV IMAGE TAG: ${env.DEV_TAG}"
 
-    echo "Applying Frontend Deployment..."
+    } else {
 
-    sh """
-        kubectl apply \
-            -f ${deploymentYaml} \
-            -n ${namespace}
-    """
+        if (!params.DEV_IMAGE_TAG?.trim()) {
+            error("DEV_IMAGE_TAG is required for ${params.ENVIRONMENT}")
+        }
 
+        if (!params.DEV_IMAGE_TAG.startsWith('DEV-')) {
+            error(
+                "DEV_IMAGE_TAG must start with DEV-, example: DEV-a1b2c3d"
+            )
+        }
 
-    echo "Applying Frontend Service..."
+        env.DEV_TAG = params.DEV_IMAGE_TAG.trim()
 
-    sh """
-        kubectl apply \
-            -f ${serviceYaml} \
-            -n ${namespace}
-    """
-
-
-    echo "Updating Frontend Image..."
-
-    sh """
-        kubectl -n ${namespace} set image \
-            deployment/frontend \
-            frontend=${image}
-    """
-
-
-    echo "Waiting for Frontend Rollout..."
-
-    sh """
-        kubectl -n ${namespace} rollout status \
-            deployment/frontend \
-            --timeout=300s
-    """
-
-
-    echo "Frontend Deployment Status:"
-
-    sh """
-        kubectl get deployment frontend \
-            -n ${namespace}
-
-        kubectl get service app1-frontend \
-            -n ${namespace}
-
-        kubectl get pods \
-            -n ${namespace}
-    """
-
-
-    echo "======================================"
-    echo "FRONTEND DEPLOYMENT COMPLETED"
-    echo "======================================"
+        echo "PROMOTING EXISTING DEV IMAGE: ${env.DEV_TAG}"
+    }
 }
 
+def setEnvironment() {
 
-/* =========================================================
-   IMAGE PROMOTION FUNCTION
-   ========================================================= */
+    if (params.ENVIRONMENT == 'dev') {
+
+        env.CLUSTER_NAME = env.DEV_CLUSTER
+        env.ECR_REPO = env.DEV_ECR_REPO
+        env.NAMESPACE = 'dev'
+        env.DEPLOY_TAG = env.DEV_TAG
+
+    } else if (params.ENVIRONMENT == 'qa') {
+
+        env.CLUSTER_NAME = env.QA_CLUSTER
+        env.ECR_REPO = env.QA_ECR_REPO
+        env.NAMESPACE = 'qa'
+        env.DEPLOY_TAG = "QA-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+
+    } else if (params.ENVIRONMENT == 'uat') {
+
+        env.CLUSTER_NAME = env.UAT_CLUSTER
+        env.ECR_REPO = env.UAT_ECR_REPO
+        env.NAMESPACE = 'uat'
+        env.DEPLOY_TAG = "UAT-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+
+    } else if (params.ENVIRONMENT == 'prod') {
+
+        env.CLUSTER_NAME = env.PROD_CLUSTER
+        env.ECR_REPO = env.PROD_ECR_REPO
+        env.NAMESPACE = 'prod'
+        env.DEPLOY_TAG = "PROD-${env.DEV_TAG.replaceFirst('DEV-', '')}"
+
+    } else {
+        error("Invalid environment: ${params.ENVIRONMENT}")
+    }
+
+    echo "ENVIRONMENT : ${params.ENVIRONMENT}"
+    echo "CLUSTER     : ${env.CLUSTER_NAME}"
+    echo "NAMESPACE   : ${env.NAMESPACE}"
+    echo "ECR REPO    : ${env.ECR_REPO}"
+    echo "DEPLOY TAG  : ${env.DEPLOY_TAG}"
+}
+
+def connectToEKS() {
+
+    withCredentials([
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
+    ]) {
+
+        sh '''
+            set -e
+
+            echo "Checking AWS credentials..."
+            aws sts get-caller-identity
+
+            echo "Connecting to EKS..."
+            echo "Cluster: ${CLUSTER_NAME}"
+            echo "Region : ${AWS_REGION}"
+
+            aws eks update-kubeconfig \
+                --name "${CLUSTER_NAME}" \
+                --region "${AWS_REGION}"
+
+            echo "Kubernetes nodes:"
+            kubectl get nodes
+        '''
+    }
+}
+
+def createNamespace() {
+
+    withCredentials([
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
+    ]) {
+
+        sh '''
+            set -e
+
+            echo "Creating namespace: ${NAMESPACE}"
+
+            kubectl create namespace "${NAMESPACE}" \
+                --dry-run=client \
+                -o yaml | kubectl apply -f -
+
+            echo "Namespace:"
+            kubectl get namespace "${NAMESPACE}"
+        '''
+    }
+}
+
+def buildFrontendImage() {
+
+    withCredentials([
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
+    ]) {
+
+        sh '''
+            set -e
+
+            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+            IMAGE="${REGISTRY}/${DEV_ECR_REPO}:${DEV_TAG}"
+
+            echo "Authenticating Docker with ECR..."
+
+            aws ecr get-login-password \
+                --region "${AWS_REGION}" |
+                docker login \
+                --username AWS \
+                --password-stdin "${REGISTRY}"
+
+            echo "Building Frontend image..."
+
+            echo "Docker build path:"
+            echo "${FRONTEND_DOCKER_PATH}"
+
+            echo "Image:"
+            echo "${IMAGE}"
+
+            docker build \
+                -t "${IMAGE}" \
+                "${FRONTEND_DOCKER_PATH}"
+
+            echo "Pushing Frontend image..."
+
+            docker push "${IMAGE}"
+
+            echo "DEV Frontend image pushed successfully."
+
+            docker logout "${REGISTRY}"
+        '''
+    }
+}
+
+def deployFrontend(String environmentRepo) {
+
+    withCredentials([
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
+    ]) {
+
+        sh """
+            set -e
+
+            REGISTRY="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+            IMAGE="\${REGISTRY}/${environmentRepo}:${env.DEPLOY_TAG}"
+
+            KUBE_PATH="${env.KUBE_PATH}"
+
+            echo "Deploying Frontend image:"
+            echo "\${IMAGE}"
+
+            echo "Kubernetes manifest path:"
+            echo "\${KUBE_PATH}"
+
+            echo "Applying Frontend Deployment..."
+
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f "\${KUBE_PATH}/frontend-deployment.yaml"
+
+            echo "Applying Frontend Service..."
+
+            kubectl apply \
+                -n "${env.NAMESPACE}" \
+                -f "\${KUBE_PATH}/frontend-service.yaml"
+
+            echo "Updating Frontend image..."
+
+            kubectl set image \
+                deployment/${env.FRONTEND_DEPLOYMENT} \
+                ${env.FRONTEND_CONTAINER}="\${IMAGE}" \
+                -n "${env.NAMESPACE}"
+
+            echo "Waiting for Frontend rollout..."
+
+            kubectl rollout status \
+                deployment/${env.FRONTEND_DEPLOYMENT} \
+                -n "${env.NAMESPACE}" \
+                --timeout=10m
+
+            echo "Frontend Deployment:"
+            kubectl get deployment \
+                "${env.FRONTEND_DEPLOYMENT}" \
+                -n "${env.NAMESPACE}"
+
+            echo "Frontend Service:"
+            kubectl get service \
+                "${env.FRONTEND_SERVICE}" \
+                -n "${env.NAMESPACE}"
+
+            echo "Frontend Pods:"
+            kubectl get pods \
+                -n "${env.NAMESPACE}" \
+                -o wide
+        """
+    }
+}
 
 def promoteImage(
-    String sourceImage,
-    String targetImage,
-    String sourceCredentials,
-    String targetCredentials
+    String sourceRepo,
+    String sourceTag,
+    String targetRepo,
+    String targetTag
 ) {
 
-    echo "======================================"
-    echo "IMAGE PROMOTION"
-    echo "======================================"
-    echo "Source : ${sourceImage}"
-    echo "Target : ${targetImage}"
-    echo "======================================"
-
-
-    /*
-     * LOGIN TO SOURCE REGISTRY
-     */
-
     withCredentials([
-        usernamePassword(
-            credentialsId: sourceCredentials,
-            usernameVariable: 'DOCKER_USERNAME',
-            passwordVariable: 'DOCKER_PASSWORD'
-        )
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
     ]) {
 
         sh """
-            echo "\$DOCKER_PASSWORD" | docker login \
-                docker.io \
-                -u "\$DOCKER_USERNAME" \
-                --password-stdin
+            set -e
 
-            docker pull ${sourceImage}
+            REGISTRY="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+            SOURCE_IMAGE="\${REGISTRY}/${sourceRepo}:${sourceTag}"
+
+            TARGET_IMAGE="\${REGISTRY}/${targetRepo}:${targetTag}"
+
+            echo "Authenticating Docker with ECR..."
+
+            aws ecr get-login-password \
+                --region "${env.AWS_REGION}" |
+                docker login \
+                --username AWS \
+                --password-stdin "\${REGISTRY}"
+
+            echo "Source image:"
+            echo "\${SOURCE_IMAGE}"
+
+            echo "Target image:"
+            echo "\${TARGET_IMAGE}"
+
+            echo "Pulling source image..."
+
+            docker pull "\${SOURCE_IMAGE}"
+
+            echo "Tagging image..."
+
+            docker tag \
+                "\${SOURCE_IMAGE}" \
+                "\${TARGET_IMAGE}"
+
+            echo "Pushing target image..."
+
+            docker push "\${TARGET_IMAGE}"
+
+            echo "Image promotion completed successfully."
+
+            docker rmi \
+                "\${SOURCE_IMAGE}" \
+                "\${TARGET_IMAGE}" || true
+
+            docker logout "\${REGISTRY}"
         """
     }
+}
 
+def productionApproval() {
 
-    /*
-     * RETAG THE EXISTING IMAGE
-     *
-     * No docker build happens here.
-     */
+    timeout(time: 30, unit: 'MINUTES') {
 
-    sh """
-        docker tag \
-            ${sourceImage} \
-            ${targetImage}
-    """
-
-
-    /*
-     * LOGIN TO TARGET REGISTRY
-     */
-
-    withCredentials([
-        usernamePassword(
-            credentialsId: targetCredentials,
-            usernameVariable: 'DOCKER_USERNAME',
-            passwordVariable: 'DOCKER_PASSWORD'
+        input(
+            message: "Deploy Frontend image ${env.DEV_TAG} to PROD?",
+            ok: 'Deploy Frontend to PROD'
         )
-    ]) {
-
-        sh """
-            echo "\$DOCKER_PASSWORD" | docker login \
-                docker.io \
-                -u "\$DOCKER_USERNAME" \
-                --password-stdin
-
-            docker push ${targetImage}
-        """
     }
-
-
-    /*
-     * REMOVE LOCAL COPIES
-     */
-
-    sh """
-        docker rmi ${sourceImage} || true
-        docker rmi ${targetImage} || true
-    """
-
-
-    echo "======================================"
-    echo "IMAGE PROMOTION COMPLETED"
-    echo "======================================"
 }
