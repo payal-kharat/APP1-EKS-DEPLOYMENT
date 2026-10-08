@@ -297,16 +297,13 @@ def setEnvironment() {
     echo "ECR REPO    : ${env.ECR_REPO}"
     echo "DEPLOY TAG  : ${env.DEPLOY_TAG}"
 }
-
 def connectToEKS() {
-
     withCredentials([
         [
             $class: 'AmazonWebServicesCredentialsBinding',
             credentialsId: "${env.AWS_CREDENTIALS}"
         ]
     ]) {
-
         sh '''
             set -e
 
@@ -323,6 +320,11 @@ def connectToEKS() {
 
             echo "Kubernetes nodes:"
             kubectl get nodes
+
+            echo "Current aws-auth ConfigMap:"
+            kubectl get configmap aws-auth \
+                -n kube-system \
+                -o yaml
         '''
     }
 }
