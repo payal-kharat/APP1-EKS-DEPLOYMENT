@@ -74,7 +74,17 @@ pipeline {
                 }
             }
         }
-
+        
+       stage('Grant Local EKS User Access') {
+              when {
+                    expression { params.ENVIRONMENT == 'dev' }
+                   }
+                     steps {
+                        script {
+                               grantLocalEKSAccess()
+        }
+    }
+}
         stage('Create Kubernetes Namespace') {
             steps {
                 script {
@@ -527,6 +537,35 @@ def promoteImage(
 
             docker logout "\${REGISTRY}"
         """
+    }
+}
+
+def grantLocalEKSAccess() {
+    withCredentials([
+        [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: "${env.AWS_CREDENTIALS}"
+        ]
+    ]) {
+        sh '''
+            set -e
+
+            echo "Granting Kubernetes access to local IAM user..."
+
+            kubectl patch configmap aws-auth \
+                -n kube-system \
+                --type merge \
+                -p '{
+                    "data": {
+                        "mapUsers": "- userarn: arn:aws:iam::552940445807:user/EKS\\n  username: EKS\\n  groups:\\n  - system:masters\\n"
+                    }
+                }'
+
+            echo "Updated aws-auth ConfigMap:"
+            kubectl get configmap aws-auth \
+                -n kube-system \
+                -o yaml
+        '''
     }
 }
 
