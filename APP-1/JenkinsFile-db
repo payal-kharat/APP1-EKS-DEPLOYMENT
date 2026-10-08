@@ -23,11 +23,7 @@ pipeline {
     environment {
         AWS_REGION = 'us-east-1'
         AWS_CREDENTIALS = 'AWS'
-
         AWS_ACCOUNT_ID = '552940445807'
-
-        ECR_REGISTRY = 'https://552940445807.dkr.ecr.us-east-1.amazonaws.com'
-        ECR_CREDENTIALS = 'ECR'
 
         DEV_ECR_REPO = 'app-1-dev-db'
         QA_ECR_REPO = 'app-1-qa-db'
@@ -45,11 +41,12 @@ pipeline {
     }
 
     stages {
-        stage('Checkout') { 
-            steps { 
-                checkout scm 
-                } 
+
+        stage('Checkout') {
+            steps {
+                checkout scm
             }
+        }
 
         stage('Get Commit ID') {
             steps {
@@ -226,6 +223,7 @@ pipeline {
 
 
 def getCommitId() {
+
     env.COMMIT_ID = sh(
         script: 'git rev-parse --short HEAD',
         returnStdout: true
@@ -234,16 +232,21 @@ def getCommitId() {
     echo "COMMIT ID: ${env.COMMIT_ID}"
 
     if (params.ENVIRONMENT == 'dev') {
+
         env.DEV_TAG = "DEV-${env.COMMIT_ID}"
 
         echo "DEV IMAGE TAG: ${env.DEV_TAG}"
+
     } else {
+
         if (!params.DEV_IMAGE_TAG?.trim()) {
             error("DEV_IMAGE_TAG is required for ${params.ENVIRONMENT}")
         }
 
         if (!params.DEV_IMAGE_TAG.startsWith('DEV-')) {
-            error("DEV_IMAGE_TAG must start with DEV-, example: DEV-a1b2c3d")
+            error(
+                "DEV_IMAGE_TAG must start with DEV-, example: DEV-a1b2c3d"
+            )
         }
 
         env.DEV_TAG = params.DEV_IMAGE_TAG.trim()
@@ -254,6 +257,7 @@ def getCommitId() {
 
 
 def setEnvironment() {
+
     if (params.ENVIRONMENT == 'dev') {
 
         env.CLUSTER_NAME = env.DEV_CLUSTER
@@ -283,6 +287,7 @@ def setEnvironment() {
         env.DEPLOY_TAG = "PROD-${env.DEV_TAG.replaceFirst('DEV-', '')}"
 
     } else {
+
         error("Invalid environment: ${params.ENVIRONMENT}")
     }
 
@@ -292,18 +297,24 @@ def setEnvironment() {
     echo "ECR REPO    : ${env.ECR_REPO}"
     echo "DEPLOY TAG  : ${env.DEPLOY_TAG}"
 }
+
+
 def connectToEKS() {
+
     withCredentials([
         [$class: 'AmazonWebServicesCredentialsBinding',
          credentialsId: "${env.AWS_CREDENTIALS}"]
     ]) {
+
         sh '''
             set -e
 
             echo "Checking AWS credentials..."
+
             aws sts get-caller-identity
 
             echo "Connecting to EKS..."
+
             echo "Cluster: ${CLUSTER_NAME}"
             echo "Region : ${AWS_REGION}"
 
@@ -312,15 +323,20 @@ def connectToEKS() {
                 --region "${AWS_REGION}"
 
             echo "Kubernetes nodes:"
+
             kubectl get nodes
         '''
     }
 }
+
+
 def createNamespace() {
+
     withCredentials([
         [$class: 'AmazonWebServicesCredentialsBinding',
          credentialsId: "${env.AWS_CREDENTIALS}"]
     ]) {
+
         sh '''
             set -e
 
@@ -331,117 +347,158 @@ def createNamespace() {
                 -o yaml | kubectl apply -f -
 
             echo "Namespace:"
+
             kubectl get namespace "${NAMESPACE}"
         '''
     }
 }
+
+
 def buildDBImage() {
-    docker.withRegistry(
-        "${env.ECR_REGISTRY}",
-        "${env.ECR_CREDENTIALS}"
-    ) {
+
+    withCredentials([
+        [$class: 'AmazonWebServicesCredentialsBinding',
+         credentialsId: "${env.AWS_CREDENTIALS}"]
+    ]) {
+
         sh '''
             set -e
 
-            IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${DEV_ECR_REPO}:${DEV_TAG}"
+            REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+            IMAGE="${REGISTRY}/${DEV_ECR_REPO}:${DEV_TAG}"
+
+            echo "Authenticating Docker with ECR..."
+
+            aws ecr get-login-password \
+                --region "${AWS_REGION}" |
+                docker login \
+                --username AWS \
+                --password-stdin "${REGISTRY}"
 
             echo "Building DB image:"
+
             echo "${IMAGE}"
 
-            docker build -t "${IMAGE}" .
+            docker build \
+                -t "${IMAGE}" \
+                .
 
             echo "Pushing DB image:"
+
             echo "${IMAGE}"
 
             docker push "${IMAGE}"
 
             echo "DEV image pushed successfully."
+
+            docker logout "${REGISTRY}"
         '''
     }
 }
 
 
 def deployDB(String environmentRepo) {
+
     withCredentials([
         [$class: 'AmazonWebServicesCredentialsBinding',
          credentialsId: "${env.AWS_CREDENTIALS}"]
     ]) {
+
         sh """
             set -e
 
-            IMAGE="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${environmentRepo}:${env.DEPLOY_TAG}"
+            REGISTRY="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+            IMAGE="\${REGISTRY}/${environmentRepo}:${env.DEPLOY_TAG}"
 
             echo "Deploying DB image:"
+
             echo "\${IMAGE}"
 
             echo "Applying StorageClass..."
+
             kubectl apply \
                 -n "${env.NAMESPACE}" \
                 -f db-storageclass.yaml
 
             echo "Applying Secret..."
+
             kubectl apply \
                 -n "${env.NAMESPACE}" \
                 -f db-secret.yaml
 
             echo "Applying ConfigMap..."
+
             kubectl apply \
                 -n "${env.NAMESPACE}" \
                 -f db-configmap.yaml
 
             echo "Applying PVC..."
+
             kubectl apply \
                 -n "${env.NAMESPACE}" \
                 -f db-pvc.yaml
 
             echo "Applying Deployment..."
+
             kubectl apply \
                 -n "${env.NAMESPACE}" \
                 -f db-deployment.yaml
 
             echo "Applying Service..."
+
             kubectl apply \
                 -n "${env.NAMESPACE}" \
                 -f db-service.yaml
 
             echo "Updating DB image..."
+
             kubectl set image \
                 deployment/${env.DB_DEPLOYMENT} \
                 ${env.DB_CONTAINER}="\${IMAGE}" \
                 -n "${env.NAMESPACE}"
 
             echo "Waiting for deployment rollout..."
+
             kubectl rollout status \
                 deployment/${env.DB_DEPLOYMENT} \
                 -n "${env.NAMESPACE}" \
                 --timeout=10m
 
             echo "StorageClass:"
+
             kubectl get storageclass
 
             echo "Secret:"
+
             kubectl get secret \
                 -n "${env.NAMESPACE}"
 
             echo "ConfigMap:"
+
             kubectl get configmap \
                 -n "${env.NAMESPACE}"
 
             echo "PVC:"
+
             kubectl get pvc \
                 -n "${env.NAMESPACE}"
 
             echo "Deployment:"
+
             kubectl get deployment \
                 "${env.DB_DEPLOYMENT}" \
                 -n "${env.NAMESPACE}"
 
             echo "Service:"
+
             kubectl get service \
                 "${env.DB_SERVICE}" \
                 -n "${env.NAMESPACE}"
 
             echo "Pods:"
+
             kubectl get pods \
                 -n "${env.NAMESPACE}" \
                 -o wide
@@ -449,35 +506,56 @@ def deployDB(String environmentRepo) {
     }
 }
 
+
 def promoteImage(
     String sourceRepo,
     String sourceTag,
     String targetRepo,
     String targetTag
 ) {
-    docker.withRegistry(
-        "${env.ECR_REGISTRY}",
-        "${env.ECR_CREDENTIALS}"
-    ) {
+
+    withCredentials([
+        [$class: 'AmazonWebServicesCredentialsBinding',
+         credentialsId: "${env.AWS_CREDENTIALS}"]
+    ]) {
+
         sh """
             set -e
 
-            SOURCE_IMAGE="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${sourceRepo}:${sourceTag}"
-            TARGET_IMAGE="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${targetRepo}:${targetTag}"
+            REGISTRY="${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+            SOURCE_IMAGE="\${REGISTRY}/${sourceRepo}:${sourceTag}"
+
+            TARGET_IMAGE="\${REGISTRY}/${targetRepo}:${targetTag}"
+
+            echo "Authenticating Docker with ECR..."
+
+            aws ecr get-login-password \
+                --region "${env.AWS_REGION}" |
+                docker login \
+                --username AWS \
+                --password-stdin "\${REGISTRY}"
 
             echo "Source image:"
+
             echo "\${SOURCE_IMAGE}"
 
             echo "Target image:"
+
             echo "\${TARGET_IMAGE}"
 
             echo "Pulling source image..."
+
             docker pull "\${SOURCE_IMAGE}"
 
             echo "Tagging image..."
-            docker tag "\${SOURCE_IMAGE}" "\${TARGET_IMAGE}"
+
+            docker tag \
+                "\${SOURCE_IMAGE}" \
+                "\${TARGET_IMAGE}"
 
             echo "Pushing target image..."
+
             docker push "\${TARGET_IMAGE}"
 
             echo "Image promotion completed successfully."
@@ -485,11 +563,17 @@ def promoteImage(
             docker rmi \
                 "\${SOURCE_IMAGE}" \
                 "\${TARGET_IMAGE}" || true
+
+            docker logout "\${REGISTRY}"
         """
     }
 }
+
+
 def productionApproval() {
+
     timeout(time: 30, unit: 'MINUTES') {
+
         input(
             message: "Deploy DB image ${env.DEV_TAG} to PROD?",
             ok: 'Deploy to PROD'
